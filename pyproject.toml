@@ -1,0 +1,24 @@
+[project]
+name = "aquaview"
+version = "0.1.11"
+description = "Python SDK for accessing AQUAVIEW API"
+authors = [
+    { name = "Pappu Jha", email = "jhapappu7165@gmail.com" }
+]
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.7"
+dependencies = [
+    "requests",
+    "pandas"
+]
+
+[project.urls]
+Homepage = "https://github.com/safaksm/aqualink"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = { find = { include = ["aquaview*"] } }
