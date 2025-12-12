@@ -1,6 +1,17 @@
-from .client import AquaviewClient
-from .endpoints.datasets import get_datasets, get_dataset_detail, get_dataset_files
-from .endpoints.preview import get_preview_coordinates
-from .endpoints.keywords import get_keywords
-from .endpoints.sources import get_sources
-from .endpoints.cdm_data_types import get_cdm_data_types
+"""
+Aquaview Python SDK
+
+A Python library for accessing oceanographic datasets through the AQUAVIEW API.
+
+Example:
+    >>> from aquaview import AquaviewClient
+    >>> 
+    >>> client = AquaviewClient()
+    >>> sources = client.get_sources()
+    >>> results = client.search(q="glider", location="42.3,-70.5", radius="100km")
+"""
+
+from .client import AquaviewClient, AquaviewError
+
+__version__ = "0.2.0"
+__all__ = ["AquaviewClient", "AquaviewError", "__version__"]
