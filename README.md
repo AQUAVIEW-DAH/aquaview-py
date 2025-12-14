@@ -10,7 +10,7 @@ A Python library for accessing oceanographic datasets through the AQUAVIEW API.
 # Install from source
 pip install -e .
 
-# Or install from PyPI (when published)
+# Or install from PyPI
 pip install aquaview
 ```
 

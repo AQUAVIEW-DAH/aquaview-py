@@ -6,7 +6,7 @@ authors = [
     { name = "AQUAVIEW Team" }
 ]
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
 requires-python = ">=3.8"
 dependencies = [
     "requests>=2.25.0"
