@@ -1,0 +1,38 @@
+[project]
+name = "aquaview"
+version = "0.4.0"
+description = "Python SDK for the AQUAVIEW oceanographic and environmental data catalog"
+authors = [{ name = "AQUAVIEW Team", email = "contact@aquaview.org" }]
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = [
+    "pystac-client>=0.8.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "ruff>=0.1.0",
+]
+
+[project.urls]
+Homepage = "https://aquaview.org"
+Repository = "https://github.com/AQUAVIEW-DAH/aquaview-py"
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["aquaview"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
