@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from pystac_client import Client
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 __all__ = ["CATALOG_URL", "connect"]
 
-CATALOG_URL = "https://aquaview-sfeos-1025757962819.us-east1.run.app"
+CATALOG_URL = "https://service.aquaview.org/stac"
 
 
 def connect(url: str = CATALOG_URL, **kwargs) -> Client:
