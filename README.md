@@ -66,9 +66,43 @@ search = client.search(
 fc = client.search(collections=["IOOS"], limit=5).item_collection_as_dict()
 ```
 
+## Data sources & curated collections
+
+Beyond catalog search, `aquaview.Client` exposes AQUAVIEW's data sources and
+curated collections:
+
+```python
+import aquaview
+
+client = aquaview.Client()
+
+# Queryable data sources (id, description, variables, limits, columns)
+for src in client.get_sources():
+    print(src["source_id"], "—", src["description"])
+
+# One source's detail
+wod = client.get_source("WOD")
+print(wod["canonical_variables"])
+
+# Curated, theme-based collections (region / platform / use case)
+for col in client.get_curated_collections():
+    print(col["id"], "—", col["title"])
+
+# Search still works — it delegates to pystac-client
+search = client.search(collections=["IOOS"], bbox=[-71, 42, -70, 43], limit=5)
+for item in search.items():
+    print(item.id)
+```
+
 ## API
 
-`aquaview.connect()` returns a [`pystac_client.Client`](https://pystac-client.readthedocs.io/en/stable/). The full pystac-client API works: search, collections, queryables, pagination, etc.
+`aquaview.Client` is the full surface — STAC search (via pystac-client) plus the
+AQUAVIEW REST APIs: `get_sources()`, `get_source(id)`, `get_curated_collections()`.
+
+`aquaview.connect()` remains a shortcut that returns a
+[`pystac_client.Client`](https://pystac-client.readthedocs.io/en/stable/) for
+search-only use; the full pystac-client API works: search, collections,
+queryables, pagination, etc.
 
 ## License
 
