@@ -115,6 +115,24 @@ client.get_similar("IOOS", "unit_1190-20241218T1433-delayed", limit=5)
 client.get_schema()
 ```
 
+### Large pulls (async export)
+
+For pulls too big to stream inline, run them as a background job. `submit_export`
+returns a handle you poll and then download — the result is partitioned into one
+file per time shard. Requires an API key.
+
+```python
+client = aquaview.Client(api_key="sk_...")
+
+job = client.submit_export("WOD", ["temperature"], bbox=[-80, 20, -60, 45])
+job.wait()                              # blocks until done (or raises JobError)
+paths = job.download("wod_export/")     # -> ["wod_export/part-0000.parquet", ...]
+
+# Or fire-and-forget:
+job = client.submit_export("WOD", ["temperature"])
+job.status()                            # {"status": "running", "progress": {...}, ...}
+```
+
 ## Authenticated calls
 
 Pass an API key (mint one in the portal under **Settings → API keys**) — or set
@@ -139,7 +157,7 @@ client.chat("what glider data is off the east coast?")
 |---|---|
 | Search (STAC) | `search()`, `get_collections()`, `get_collection(id)` |
 | Sources & collections | `get_sources()`, `get_source(id)`, `get_curated_collections()` |
-| Data & discovery | `get_data(...)`, `get_similar(...)`, `get_schema()` |
+| Data & discovery | `get_data(...)`, `submit_export(...)` → `ExportJob`, `get_similar(...)`, `get_schema()` |
 | Account (needs key) | `get_usage()`, `create_api_key(...)`, `delete_api_key(id)` |
 | NL & chat | `interpret(query)`, `chat(message)` |
 

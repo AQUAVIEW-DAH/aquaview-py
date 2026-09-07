@@ -1,12 +1,15 @@
 """Unit tests for aquaview.Client — HTTP is mocked, so these run offline."""
 
+import pytest
+
 import aquaview
 
 
 class FakeResponse:
-    def __init__(self, data=None, content=b""):
+    def __init__(self, data=None, content=b"", status_code=200):
         self._data = data
         self.content = content
+        self.status_code = status_code
 
     def raise_for_status(self):
         return None
@@ -128,6 +131,105 @@ def test_get_data_streams_to_file(monkeypatch, tmp_path):
     returned = aquaview.Client().get_data("WOD", ["temperature"], to_file=str(dest))
     assert returned == str(dest)
     assert dest.read_bytes() == b"a,b\n1,2\n"
+
+
+# --- async export ---
+
+
+def test_submit_export_returns_job(monkeypatch):
+    seen = {}
+
+    def fake_post(url, params=None, json=None, headers=None, **kwargs):
+        seen.update(url=url, params=params, json=json, headers=headers)
+        return FakeResponse(
+            data={"job_id": "job_9", "status_url": "/api/jobs/job_9"}, status_code=202
+        )
+
+    monkeypatch.setattr(aquaview.httpx, "post", fake_post)
+    job = aquaview.Client(api_key="sk").submit_export(
+        "WOD", ["temperature"], bbox=[-80, 20, -60, 45]
+    )
+
+    assert isinstance(job, aquaview.ExportJob)
+    assert job.job_id == "job_9"
+    assert seen["url"] == "https://service.aquaview.org/api/data/"
+    assert seen["params"] == {"async": "true"}
+    assert seen["json"]["source"] == "WOD"
+    assert seen["headers"] == {"Authorization": "Bearer sk"}
+
+
+def test_submit_export_rejects_bad_format():
+    with pytest.raises(ValueError):
+        aquaview.Client().submit_export("WOD", ["temperature"], format="netcdf")
+
+
+def test_submit_export_inline_response_raises(monkeypatch):
+    monkeypatch.setattr(
+        aquaview.httpx, "post", lambda *a, **k: FakeResponse(content=b"inline", status_code=200)
+    )
+    with pytest.raises(aquaview.JobError):
+        aquaview.Client(api_key="sk").submit_export("WOD", ["temperature"])
+
+
+def test_export_job_status(monkeypatch):
+    seen = {}
+
+    def fake_get(url, params=None, headers=None, **kwargs):
+        seen["url"] = url
+        return FakeResponse(data={"status": "running", "progress": {"done": 1, "total": 4}})
+
+    monkeypatch.setattr(aquaview.httpx, "get", fake_get)
+    job = aquaview.ExportJob(aquaview.Client(api_key="sk"), "job_9")
+    assert job.status()["status"] == "running"
+    assert seen["url"] == "https://service.aquaview.org/api/jobs/job_9"
+
+
+def test_export_job_wait_polls_until_done(monkeypatch):
+    states = [{"status": "running"}, {"status": "running"}, {"status": "done"}]
+    monkeypatch.setattr(aquaview.httpx, "get", lambda *a, **k: FakeResponse(data=states.pop(0)))
+    monkeypatch.setattr(aquaview.time, "sleep", lambda _s: None)
+    job = aquaview.ExportJob(aquaview.Client(api_key="sk"), "job_9")
+    assert job.wait(poll_interval=0) is job
+    assert states == []  # all three polls consumed
+
+
+def test_export_job_wait_raises_on_failure(monkeypatch):
+    monkeypatch.setattr(
+        aquaview.httpx,
+        "get",
+        lambda *a, **k: FakeResponse(data={"status": "failed", "error": "boom"}),
+    )
+    monkeypatch.setattr(aquaview.time, "sleep", lambda _s: None)
+    with pytest.raises(aquaview.JobError, match="boom"):
+        aquaview.ExportJob(aquaview.Client(api_key="sk"), "job_9").wait(poll_interval=0)
+
+
+def test_export_job_download_parts(monkeypatch, tmp_path):
+    def fake_get(url, params=None, headers=None, **kwargs):
+        if url.endswith("/api/jobs/job_9"):
+            return FakeResponse(
+                data={"status": "done", "manifest_url": "https://store/manifest.json"}
+            )
+        if url == "https://store/manifest.json":
+            return FakeResponse(
+                data={
+                    "format": "parquet",
+                    "parts": [
+                        {"idx": 0, "url": "https://store/part0"},
+                        {"idx": 1, "url": "https://store/part1"},
+                    ],
+                }
+            )
+        return FakeResponse(content=b"DATA:" + url.encode())
+
+    monkeypatch.setattr(aquaview.httpx, "get", fake_get)
+    monkeypatch.setattr(aquaview.time, "sleep", lambda _s: None)
+    job = aquaview.ExportJob(aquaview.Client(api_key="sk"), "job_9")
+    paths = job.download(str(tmp_path))
+
+    assert len(paths) == 2
+    assert paths[0].endswith("part-0000.parquet")
+    assert (tmp_path / "part-0001.parquet").read_bytes() == b"DATA:https://store/part1"
 
 
 # --- auth ---

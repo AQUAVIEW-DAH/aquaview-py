@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `get_similar(source, dataset_id)`, `get_schema()`.
   - Data: `get_data(source, variables, ...)` — slice a source to
     csv/parquet/arrow/ipc/netcdf, returned as bytes or streamed to `to_file`.
+  - Async export for large pulls: `submit_export(...)` returns an `ExportJob`
+    with `status()` / `wait()` / `download(dir)` (result is one file per time
+    shard). Raises `JobError` on failure/timeout. Requires an API key.
   - Authenticated (API key via `api_key=` or `AQUAVIEW_API_KEY`, sent as a
     Bearer token; also unlocks gated sources/data): `get_usage()`,
     `create_api_key(client_name, scope=)`, `delete_api_key(key_id)`.

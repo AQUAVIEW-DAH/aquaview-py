@@ -12,6 +12,7 @@ Two entry points:
 from __future__ import annotations
 
 import os
+import time
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
@@ -37,7 +38,16 @@ API_KEY_ENV = "AQUAVIEW_API_KEY"
 DEFAULT_TIMEOUT = 30.0
 
 
-__all__ = ["API_KEY_ENV", "API_URL", "CATALOG_URL", "Client", "__version__", "connect"]
+__all__ = [
+    "API_KEY_ENV",
+    "API_URL",
+    "CATALOG_URL",
+    "Client",
+    "ExportJob",
+    "JobError",
+    "__version__",
+    "connect",
+]
 
 
 class Client:
@@ -222,6 +232,59 @@ class Client:
         resp.raise_for_status()
         return resp.content
 
+    def submit_export(
+        self,
+        source: str,
+        variables: list[str],
+        *,
+        bbox: list[float] | None = None,
+        datetime: str | None = None,
+        depth: list[float] | None = None,
+        filters: dict[str, Any] | None = None,
+        format: str = "parquet",
+    ) -> ExportJob:
+        """Submit a large, unbounded pull as a background job.
+
+        For pulls too big to stream inline, this runs server-side and returns an
+        :class:`ExportJob` you poll and then download. Wraps
+        ``POST /api/data/?async=true`` → ``202`` with a job id. **Requires an API
+        key** (jobs are owner-scoped), and ``format`` must be ``parquet`` or
+        ``csv``. For small or bounded pulls, use :meth:`get_data` instead.
+
+        Example::
+
+            job = client.submit_export("WOD", ["temperature"], bbox=[-80, 20, -60, 45])
+            job.wait()
+            paths = job.download("wod_export/")   # one file per time shard
+        """
+        if format not in ("parquet", "csv"):
+            raise ValueError("async export supports only 'parquet' or 'csv'")
+        body: dict[str, Any] = {"source": source, "variables": list(variables), "format": format}
+        if bbox is not None:
+            body["bbox"] = list(bbox)
+        if datetime is not None:
+            body["datetime"] = datetime
+        if depth is not None:
+            body["depth"] = list(depth)
+        if filters is not None:
+            body["filters"] = filters
+
+        resp = httpx.post(
+            f"{self.api_url}/api/data/",
+            params={"async": "true"},
+            json=body,
+            headers=self._headers(),
+            timeout=self._timeout,
+            follow_redirects=True,
+        )
+        resp.raise_for_status()
+        if resp.status_code != 202:
+            raise JobError(
+                "the server ran this query inline (it wasn't large enough for a background "
+                "job) — use get_data() for this pull instead"
+            )
+        return ExportJob(self, resp.json()["job_id"])
+
     # ------------------------------------------------------------------ #
     # Authenticated: account usage, API-key management
     # ------------------------------------------------------------------ #
@@ -298,6 +361,84 @@ class Client:
     def __repr__(self) -> str:
         keyed = "keyed" if self.api_key else "anonymous"
         return f"Client(api_url={self.api_url!r}, {keyed})"
+
+
+class JobError(RuntimeError):
+    """An async export job failed, timed out, or has no result to download."""
+
+
+class ExportJob:
+    """Handle to an async data-export job (see :meth:`Client.submit_export`).
+
+    An async export runs server-side and produces a **multi-part** result — one
+    file per time shard, listed in a manifest. Poll with :meth:`status` /
+    :meth:`wait`, then :meth:`download` the parts into a directory.
+    """
+
+    def __init__(self, client: Client, job_id: str) -> None:
+        self._client = client
+        self.job_id = job_id
+
+    def status(self) -> dict:
+        """Current job status. Wraps ``GET /api/jobs/{job_id}`` (needs the API key)."""
+        return self._client._get_json(f"{self._client.api_url}/api/jobs/{self.job_id}")
+
+    def wait(self, *, poll_interval: float = 2.0, timeout: float = 900.0) -> ExportJob:
+        """Poll until the job reaches a terminal state.
+
+        Returns ``self`` when the job is ``done``; raises :class:`JobError` if it
+        ``failed`` or ``timeout`` seconds elapse first.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            status = self.status()
+            state = status.get("status")
+            if state == "done":
+                return self
+            if state == "failed":
+                raise JobError(
+                    f"export job {self.job_id} failed: {status.get('error') or 'unknown error'}"
+                )
+            if time.monotonic() > deadline:
+                raise JobError(f"export job {self.job_id} did not finish within {timeout:.0f}s")
+            time.sleep(poll_interval)
+
+    def manifest(self) -> dict:
+        """The result manifest (``{format, parts: [{url, ...}]}``). Call after the job is done."""
+        url = self.status().get("manifest_url")
+        if not url:
+            raise JobError(f"export job {self.job_id} has no result manifest yet")
+        resp = httpx.get(url, timeout=self._client._timeout, follow_redirects=True)
+        resp.raise_for_status()
+        return resp.json()
+
+    def download(self, dest_dir: str, *, wait: bool = True) -> list[str]:
+        """Download every part of the result into ``dest_dir``; returns the file paths.
+
+        The result is partitioned by time into one file per part. Pass
+        ``wait=False`` if you've already waited for completion.
+        """
+        if wait:
+            self.wait()
+        manifest = self.manifest()
+        fmt = manifest.get("format", "parquet")
+        os.makedirs(dest_dir, exist_ok=True)
+        paths: list[str] = []
+        for part in sorted(manifest.get("parts", []), key=lambda p: p.get("idx", 0)):
+            part_url = part.get("url")
+            if not part_url:
+                continue
+            # Part URLs point at object storage, not our API — no auth header.
+            resp = httpx.get(part_url, timeout=None, follow_redirects=True)
+            resp.raise_for_status()
+            path = os.path.join(dest_dir, f"part-{part.get('idx', len(paths)):04d}.{fmt}")
+            with open(path, "wb") as fh:
+                fh.write(resp.content)
+            paths.append(path)
+        return paths
+
+    def __repr__(self) -> str:
+        return f"ExportJob(job_id={self.job_id!r})"
 
 
 def connect(url: str = CATALOG_URL, **kwargs: Any) -> StacClient:
