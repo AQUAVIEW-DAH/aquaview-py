@@ -42,3 +42,9 @@ def test_client_get_curated_collections():
     collections = client.get_curated_collections()
     assert len(collections) > 0
     assert all("id" in c for c in collections)
+
+
+def test_client_get_schema():
+    client = aquaview.Client()
+    schema = client.get_schema()
+    assert isinstance(schema, dict)

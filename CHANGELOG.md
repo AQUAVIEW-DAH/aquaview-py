@@ -10,8 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `aquaview.Client` — a unified client covering STAC search (via pystac-client)
-  plus the AQUAVIEW REST APIs: `get_sources()`, `get_source(id)`, and
-  `get_curated_collections()`. `connect()` is kept as a search-only shortcut.
+  plus the AQUAVIEW REST APIs. `connect()` is kept as a search-only shortcut.
+  - Discovery: `get_sources()`, `get_source(id)`, `get_curated_collections()`,
+    `get_similar(source, dataset_id)`, `get_schema()`.
+  - Data: `get_data(source, variables, ...)` — slice a source to
+    csv/parquet/arrow/ipc/netcdf, returned as bytes or streamed to `to_file`.
+  - Authenticated (API key via `api_key=` or `AQUAVIEW_API_KEY`, sent as a
+    Bearer token; also unlocks gated sources/data): `get_usage()`,
+    `create_api_key(client_name, scope=)`, `delete_api_key(key_id)`.
+  - NL & chat: `interpret(query)`, `chat(message)`.
 - Automated release pipeline: `.github/workflows/release.yml` builds and publishes
   to PyPI via Trusted Publishing (OIDC) when a `v*` tag is pushed. The tag must
   match the `pyproject.toml` version or the build fails.

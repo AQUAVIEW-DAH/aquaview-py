@@ -94,15 +94,58 @@ for item in search.items():
     print(item.id)
 ```
 
+## Pulling data
+
+`get_data()` slices a source and returns the bytes, or streams them straight to
+a file:
+
+```python
+client.get_data(
+    "WOD",
+    variables=["temperature", "salinity"],
+    bbox=[-71, 42, -70, 43],
+    datetime="2020-01-01/2020-12-31",
+    limit=1000,
+    format="csv",         # parquet | csv | arrow | ipc | netcdf
+    to_file="wod.csv",    # omit to get the bytes back instead
+)
+
+# Similar datasets, and the Beacon schema
+client.get_similar("IOOS", "unit_1190-20241218T1433-delayed", limit=5)
+client.get_schema()
+```
+
+## Authenticated calls
+
+Pass an API key (mint one in the portal under **Settings → API keys**) — or set
+`AQUAVIEW_API_KEY` — to reach gated data and account endpoints:
+
+```python
+client = aquaview.Client(api_key="sk_...")
+
+client.get_usage()                      # your usage, limits, warnings
+client.create_api_key("my CI job")      # mint a scoped key (returned once)
+client.delete_api_key("key_123")        # revoke one
+
+client.interpret("warm water off Florida in 2024")   # NL → structured filters
+client.chat("what glider data is off the east coast?")
+```
+
 ## API
 
-`aquaview.Client` is the full surface — STAC search (via pystac-client) plus the
-AQUAVIEW REST APIs: `get_sources()`, `get_source(id)`, `get_curated_collections()`.
+`aquaview.Client` is the full surface:
+
+| Area | Methods |
+|---|---|
+| Search (STAC) | `search()`, `get_collections()`, `get_collection(id)` |
+| Sources & collections | `get_sources()`, `get_source(id)`, `get_curated_collections()` |
+| Data & discovery | `get_data(...)`, `get_similar(...)`, `get_schema()` |
+| Account (needs key) | `get_usage()`, `create_api_key(...)`, `delete_api_key(id)` |
+| NL & chat | `interpret(query)`, `chat(message)` |
 
 `aquaview.connect()` remains a shortcut that returns a
 [`pystac_client.Client`](https://pystac-client.readthedocs.io/en/stable/) for
-search-only use; the full pystac-client API works: search, collections,
-queryables, pagination, etc.
+search-only use.
 
 ## License
 
