@@ -119,13 +119,7 @@ client.get_schema()
 
 For pulls too big to stream inline, run them as a background job. `submit_export`
 returns a handle you poll and then download — the result is partitioned into one
-file per time shard.
-
-> **Auth limitation:** the async job endpoints (`/api/data/?async=true`,
-> `/api/jobs/*`) are authenticated by a logged-in **session**, not an API key.
-> Until the SDK gains session login (or the API accepts API keys on those
-> routes), calling `submit_export()` with only an API key raises
-> `AquaviewAPIError` (401). Small/bounded pulls via `get_data()` are unaffected.
+file per time shard. Requires an API key.
 
 ```python
 client = aquaview.Client(api_key="sk_...")
@@ -168,11 +162,9 @@ Errors come back as `aquaview.AquaviewAPIError` with `.status`, `.code`
 |---|---|
 | Search (STAC) | `search()`, `get_collections()`, `get_collection(id)` |
 | Sources & collections | `get_sources()`, `get_source(id)`, `get_curated_collections()` |
-| Data & discovery | `get_data(...)`, `submit_export(...)` → `ExportJob`*, `get_similar(...)`, `get_schema()` |
+| Data & discovery | `get_data(...)`, `submit_export(...)` → `ExportJob`, `get_similar(...)`, `get_schema()` |
 | Account (needs key) | `get_usage()` |
 | NL & chat | `interpret(query)`, `chat(message)`, `chat_stream(message)` |
-
-\* `submit_export` needs a logged-in session (see the async note above).
 
 `aquaview.connect()` remains a shortcut that returns a
 [`pystac_client.Client`](https://pystac-client.readthedocs.io/en/stable/) for

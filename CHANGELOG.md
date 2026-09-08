@@ -21,9 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Account usage: `get_usage()`.
   - Async export for large pulls: `submit_export(...)` returns an `ExportJob`
     with `status()` / `wait()` / `download(dir)` (result is one file per time
-    shard). Raises `JobError` on failure/timeout. **Note:** the async job
-    endpoints authenticate by a logged-in session, not an API key — see the
-    README for the current limitation.
+    shard). Raises `JobError` on failure/timeout. Authenticated with an API key.
 - `AquaviewAPIError` — raised on API errors, exposing `status`, `code`
   (e.g. `query_too_large`, `unknown_variable`), `message`, and the raw `payload`.
 - API-key auth via `api_key=` / `AQUAVIEW_API_KEY` (sent as a Bearer token; also

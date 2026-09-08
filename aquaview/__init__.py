@@ -266,14 +266,9 @@ class Client:
         """Submit a large, unbounded pull as a background job.
 
         Wraps ``POST /api/data/?async=true`` → ``202`` with a job id, returning an
-        :class:`ExportJob` to poll and download. ``format`` must be ``parquet`` or
-        ``csv``.
-
-        .. note::
-           The async job endpoints are authenticated by a **logged-in session**,
-           not an API key. Until the SDK supports session login (or the API
-           accepts API keys here), calling this with only an API key will raise
-           ``AquaviewAPIError`` (401). See the README for status.
+        :class:`ExportJob` to poll and download. Requires an API key, and
+        ``format`` must be ``parquet`` or ``csv``. For small or bounded pulls use
+        :meth:`get_data` instead.
         """
         if format not in ("parquet", "csv"):
             raise ValueError("async export supports only 'parquet' or 'csv'")
