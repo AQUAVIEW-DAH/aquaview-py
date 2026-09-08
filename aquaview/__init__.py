@@ -330,9 +330,10 @@ class Client:
                     event = None
 
     def chat(self, message: str) -> Any:
-        """Ask the AQUAVIEW agent and return the final answer (consumes the
+        """Ask the AQUAVIEW agent and return its final answer text (consumes the
         stream for you). Raises :class:`AquaviewAPIError` if the agent emits an
-        ``error`` event. For live progress, use :meth:`chat_stream`.
+        ``error`` event. For the full structured payload or live progress, use
+        :meth:`chat_stream`.
         """
         result: Any = None
         for evt in self.chat_stream(message):
@@ -343,6 +344,11 @@ class Client:
                 raise AquaviewAPIError(
                     0, data.get("code"), data.get("message", "chat failed"), data
                 )
+        # The `result` event carries a structured payload; the human-readable
+        # answer is under "assistantMessage". Fall back to the raw payload if a
+        # future shape omits it, so callers still get something.
+        if isinstance(result, dict):
+            return result.get("assistantMessage", result)
         return result
 
     # ------------------------------------------------------------------ #

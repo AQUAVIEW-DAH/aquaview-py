@@ -178,7 +178,10 @@ def test_interpret_body():
 
 
 def test_chat_stream_parses_events():
-    body = b'event: connected\ndata: {"message": "hi"}\n\nevent: result\ndata: {"answer": "42"}\n\n'
+    body = (
+        b'event: connected\ndata: {"message": "hi"}\n\n'
+        b'event: result\ndata: {"type": "answer", "assistantMessage": "hello"}\n\n'
+    )
 
     def handler(req):
         assert req.url.path == "/api/agent/chat/stream"
@@ -186,16 +189,22 @@ def test_chat_stream_parses_events():
 
     events = list(client_with(handler).chat_stream("q"))
     assert events[0] == {"event": "connected", "data": {"message": "hi"}}
-    assert events[-1] == {"event": "result", "data": {"answer": "42"}}
+    assert events[-1]["event"] == "result"
+    assert events[-1]["data"]["assistantMessage"] == "hello"
 
 
-def test_chat_returns_final_result():
-    body = b'event: progress\ndata: {"pct": 50}\n\nevent: result\ndata: {"answer": "42"}\n\n'
+def test_chat_returns_answer_text():
+    # The real `result` event is a structured payload; chat() extracts the text.
+    body = (
+        b'event: progress\ndata: {"pct": 50}\n\n'
+        b'event: result\ndata: {"type": "answer", "assistantMessage": "42 deployments", '
+        b'"download_url": null}\n\n'
+    )
 
     def handler(req):
         return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
 
-    assert client_with(handler).chat("q") == {"answer": "42"}
+    assert client_with(handler).chat("q") == "42 deployments"
 
 
 def test_chat_raises_on_error_event():
