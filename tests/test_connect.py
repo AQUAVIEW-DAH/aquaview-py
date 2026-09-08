@@ -1,6 +1,14 @@
-"""Integration tests against the live AQUAVIEW catalog."""
+"""Integration tests against the live AQUAVIEW catalog.
+
+Marked ``integration`` (see pyproject) so they're excluded from the default
+run. Exercise them explicitly with ``pytest -m integration``.
+"""
+
+import pytest
 
 import aquaview
+
+pytestmark = pytest.mark.integration
 
 
 def test_connect():

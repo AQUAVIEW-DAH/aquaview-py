@@ -27,7 +27,7 @@ import aquaview
 
 client = aquaview.connect()
 
-# List data sources
+# List STAC collections
 for col in client.get_collections():
     print(f"{col.id}: {col.title}")
 
@@ -106,8 +106,8 @@ client.get_data(
     bbox=[-71, 42, -70, 43],
     datetime="2020-01-01/2020-12-31",
     limit=1000,
-    format="csv",         # parquet | csv | arrow | ipc | netcdf
-    to_file="wod.csv",    # omit to get the bytes back instead
+    format="csv",  # parquet | csv | arrow | ipc | netcdf
+    to_file="wod.csv",  # omit to get the bytes back instead
 )
 
 # Similar datasets, and the Beacon schema
@@ -119,18 +119,24 @@ client.get_schema()
 
 For pulls too big to stream inline, run them as a background job. `submit_export`
 returns a handle you poll and then download — the result is partitioned into one
-file per time shard. Requires an API key.
+file per time shard.
+
+> **Auth limitation:** the async job endpoints (`/api/data/?async=true`,
+> `/api/jobs/*`) are authenticated by a logged-in **session**, not an API key.
+> Until the SDK gains session login (or the API accepts API keys on those
+> routes), calling `submit_export()` with only an API key raises
+> `AquaviewAPIError` (401). Small/bounded pulls via `get_data()` are unaffected.
 
 ```python
 client = aquaview.Client(api_key="sk_...")
 
 job = client.submit_export("WOD", ["temperature"], bbox=[-80, 20, -60, 45])
-job.wait()                              # blocks until done (or raises JobError)
-paths = job.download("wod_export/")     # -> ["wod_export/part-0000.parquet", ...]
+job.wait()  # blocks until done (or raises JobError)
+paths = job.download("wod_export/")  # -> ["wod_export/part-0000.parquet", ...]
 
 # Or fire-and-forget:
 job = client.submit_export("WOD", ["temperature"])
-job.status()                            # {"status": "running", "progress": {...}, ...}
+job.status()  # {"status": "running", "progress": {...}, ...}
 ```
 
 ## Authenticated calls
@@ -141,13 +147,18 @@ Pass an API key (mint one in the portal under **Settings → API keys**) — or 
 ```python
 client = aquaview.Client(api_key="sk_...")
 
-client.get_usage()                      # your usage, limits, warnings
-client.create_api_key("my CI job")      # mint a scoped key (returned once)
-client.delete_api_key("key_123")        # revoke one
+client.get_usage()  # your usage, limits, warnings
 
-client.interpret("warm water off Florida in 2024")   # NL → structured filters
-client.chat("what glider data is off the east coast?")
+client.interpret("warm water off Florida in 2024")  # NL → structured filters
+
+# Ask the agent — chat() returns the final answer; chat_stream() yields live events
+print(client.chat("what glider data is off the east coast?"))
+for event in client.chat_stream("summarize WOD coverage in the Gulf"):
+    print(event["event"], event["data"])
 ```
+
+Errors come back as `aquaview.AquaviewAPIError` with `.status`, `.code`
+(e.g. `query_too_large`), `.message`, and the raw `.payload`.
 
 ## API
 
@@ -157,9 +168,11 @@ client.chat("what glider data is off the east coast?")
 |---|---|
 | Search (STAC) | `search()`, `get_collections()`, `get_collection(id)` |
 | Sources & collections | `get_sources()`, `get_source(id)`, `get_curated_collections()` |
-| Data & discovery | `get_data(...)`, `submit_export(...)` → `ExportJob`, `get_similar(...)`, `get_schema()` |
-| Account (needs key) | `get_usage()`, `create_api_key(...)`, `delete_api_key(id)` |
-| NL & chat | `interpret(query)`, `chat(message)` |
+| Data & discovery | `get_data(...)`, `submit_export(...)` → `ExportJob`*, `get_similar(...)`, `get_schema()` |
+| Account (needs key) | `get_usage()` |
+| NL & chat | `interpret(query)`, `chat(message)`, `chat_stream(message)` |
+
+\* `submit_export` needs a logged-in session (see the async note above).
 
 `aquaview.connect()` remains a shortcut that returns a
 [`pystac_client.Client`](https://pystac-client.readthedocs.io/en/stable/) for

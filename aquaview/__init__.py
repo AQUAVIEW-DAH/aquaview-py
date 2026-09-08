@@ -5,14 +5,16 @@ Two entry points:
 - :func:`connect` — a thin shortcut that returns a ``pystac_client.Client`` for
   searching the STAC catalog. Kept for backwards compatibility.
 - :class:`Client` — the full SDK surface: STAC search, data sources and curated
-  collections, data slicing, recommendations, and (with an API key) account
-  usage, key management, and the natural-language / chat helpers.
+  collections, data slicing, recommendations, chat, and — with an API key —
+  account usage and the natural-language helper.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import time
+from collections.abc import Iterator
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
@@ -35,12 +37,16 @@ API_URL = "https://service.aquaview.org"
 #: Environment variable read for the API key when one isn't passed explicitly.
 API_KEY_ENV = "AQUAVIEW_API_KEY"
 
-DEFAULT_TIMEOUT = 30.0
+#: Bounded connect/write/pool, but an unbounded read so a legitimately long
+#: slice or SSE stream isn't cut off. A dead connection still fails fast.
+DEFAULT_TIMEOUT = httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)
+STREAM_TIMEOUT = httpx.Timeout(connect=30.0, read=None, write=30.0, pool=30.0)
 
 
 __all__ = [
     "API_KEY_ENV",
     "API_URL",
+    "AquaviewAPIError",
     "CATALOG_URL",
     "Client",
     "ExportJob",
@@ -50,6 +56,26 @@ __all__ = [
 ]
 
 
+class AquaviewAPIError(RuntimeError):
+    """An AQUAVIEW API call returned an error.
+
+    Carries the HTTP ``status``, the API's machine-readable ``code`` (e.g.
+    ``query_too_large``, ``unknown_variable``) when present, a human ``message``,
+    and the raw ``payload`` for anything else (e.g. ``available_variables``).
+    """
+
+    def __init__(self, status: int, code: str | None, message: str, payload: Any = None) -> None:
+        self.status = status
+        self.code = code
+        self.message = message
+        self.payload = payload
+        super().__init__(f"[{status}{f' {code}' if code else ''}] {message}")
+
+
+class JobError(RuntimeError):
+    """An async export job failed, timed out, or has no result to download."""
+
+
 class Client:
     """A client for the AQUAVIEW catalog and data APIs.
 
@@ -57,13 +83,12 @@ class Client:
 
     - the **STAC catalog** (search / collections / items), via ``pystac-client``;
     - the **AQUAVIEW REST API** (sources, curated collections, data slicing,
-      recommendations, and — with an API key — account usage, key management,
-      and the NL-search / chat helpers).
+      recommendations, chat, and — with an API key — account usage and the
+      NL-search helper).
 
-    Pass ``api_key`` (or set the ``AQUAVIEW_API_KEY`` environment variable) to
-    reach authenticated endpoints and gated data. The key is sent as an
-    ``Authorization: Bearer`` header — the same key you mint in the AQUAVIEW
-    portal under Settings → API keys.
+    Pass ``api_key`` (or set ``AQUAVIEW_API_KEY``) to reach key-authenticated
+    endpoints and gated data. The key is sent as ``Authorization: Bearer`` — the
+    same key you mint in the AQUAVIEW portal under Settings → API keys.
 
     Example::
 
@@ -71,19 +96,13 @@ class Client:
 
         client = aquaview.Client()  # or Client(api_key="sk_...")
 
-        # Discover
         for src in client.get_sources():
             print(src["source_id"], "—", src["description"])
 
-        # Search (delegates to pystac-client)
-        search = client.search(collections=["IOOS"], bbox=[-71, 42, -70, 43])
-
-        # Pull a slice of data straight to a file
         client.get_data(
             "WOD",
-            variables=["temperature", "salinity"],
+            variables=["temperature"],
             bbox=[-71, 42, -70, 43],
-            datetime="2020-01-01/2020-12-31",
             format="csv",
             to_file="wod.csv",
         )
@@ -95,15 +114,32 @@ class Client:
         api_url: str = API_URL,
         *,
         api_key: str | None = None,
-        timeout: float = DEFAULT_TIMEOUT,
+        timeout: httpx.Timeout | float | None = None,
         **stac_kwargs: Any,
     ) -> None:
         self.catalog_url = catalog_url
         self.api_url = api_url.rstrip("/")
         self.api_key = api_key or os.environ.get(API_KEY_ENV)
-        self._timeout = timeout
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        # One pooled, keep-alive connection reused across every REST call.
+        self._http = httpx.Client(
+            headers=headers,
+            timeout=timeout if timeout is not None else DEFAULT_TIMEOUT,
+            follow_redirects=True,
+        )
         self._stac_kwargs = stac_kwargs
         self._stac: StacClient | None = None
+
+    # context-manager sugar so callers can close the pool deterministically
+    def __enter__(self) -> Client:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Close the underlying HTTP connection pool."""
+        self._http.close()
 
     # ------------------------------------------------------------------ #
     # STAC catalog (search / discovery) — delegated to pystac-client
@@ -139,37 +175,36 @@ class Client:
     # ------------------------------------------------------------------ #
 
     def get_sources(self) -> list[dict]:
-        """List the data sources visible to the caller.
+        """List the data sources visible to the caller (registry summaries).
 
-        Each entry is a registry summary: ``source_id``, ``description``,
-        ``canonical_variables``, ``default_limit`` / ``max_limit``, and column
-        metadata. With an API key, gated sources you're entitled to appear too.
-        Wraps ``GET /api/data/sources``.
+        With an API key, gated sources you're entitled to appear too. Wraps
+        ``GET /api/data/sources``.
         """
-        payload = self._get_json(f"{self.api_url}/api/data/sources")
-        return payload.get("sources", [])
+        return self._get_json(f"{self.api_url}/api/data/sources").get("sources", [])
 
     def get_source(self, source_id: str) -> dict:
         """Fetch one source's detail. Wraps ``GET /api/data/sources/{source_id}``."""
         return self._get_json(f"{self.api_url}/api/data/sources/{source_id}")
 
     def get_curated_collections(self) -> list[dict]:
-        """Return AQUAVIEW's curated, theme-based collections (distinct from the
-        STAC collections in :meth:`get_collections`). Wraps ``GET /api/collections``.
+        """AQUAVIEW's curated, theme-based collections (distinct from the STAC
+        collections in :meth:`get_collections`). Wraps ``GET /api/collections``.
         """
         return self._get_json(f"{self.api_url}/api/collections")
 
-    def get_similar(self, source: str, dataset_id: str, *, limit: int = 10) -> Any:
-        """Datasets similar to the given one, scored with match reasons.
+    def get_similar(self, source: str, dataset_id: str, *, limit: int = 10) -> list[dict]:
+        """Datasets similar to the given one, each scored with match reasons.
 
-        Wraps ``GET /api/recommendations/similar/{source}/{dataset_id}``.
+        Returns the ``similar`` list. Wraps
+        ``GET /api/recommendations/similar/{source}/{dataset_id}``.
         """
-        return self._get_json(
+        payload = self._get_json(
             f"{self.api_url}/api/recommendations/similar/{source}/{dataset_id}",
             params={"limit": limit},
         )
+        return payload.get("similar", []) if isinstance(payload, dict) else payload
 
-    def get_schema(self) -> Any:
+    def get_schema(self) -> dict:
         """Available Beacon collections and their columns. Wraps ``GET /api/beacon/schema``."""
         return self._get_json(f"{self.api_url}/api/beacon/schema")
 
@@ -194,42 +229,27 @@ class Client:
 
         Wraps ``POST /api/data/``. ``variables`` are canonical variable names
         (see :meth:`get_source`). Narrow the pull with ``bbox`` (``[w, s, e, n]``),
-        ``datetime`` (ISO-8601 range), ``depth`` (``[min_m, max_m]``),
-        per-column ``filters``, and ``limit``. ``format`` is one of
-        ``parquet`` / ``csv`` / ``arrow`` / ``ipc`` / ``netcdf``.
+        ``datetime`` (ISO-8601 range), ``depth`` (``[min_m, max_m]``), per-column
+        ``filters``, and ``limit``. ``format`` is one of ``parquet`` / ``csv`` /
+        ``arrow`` / ``ipc`` / ``netcdf``.
 
-        Pass ``to_file`` to stream the response straight to disk (recommended
-        for large pulls) — the path is returned. Otherwise the response body is
-        returned as ``bytes``. Gated sources require an ``api_key``.
+        Pass ``to_file`` to stream straight to disk (recommended for large pulls)
+        and get the path back; otherwise the body is returned as ``bytes``. Gated
+        sources require an ``api_key``. If the pull is too large to stream inline,
+        the API raises ``AquaviewAPIError(code="query_too_large")`` — see
+        :meth:`submit_export`.
         """
-        body: dict[str, Any] = {"source": source, "variables": list(variables), "format": format}
-        if bbox is not None:
-            body["bbox"] = list(bbox)
-        if datetime is not None:
-            body["datetime"] = datetime
-        if depth is not None:
-            body["depth"] = list(depth)
-        if filters is not None:
-            body["filters"] = filters
-        if limit is not None:
-            body["limit"] = limit
-
+        body = self._data_body(source, variables, bbox, datetime, depth, filters, limit, format)
         url = f"{self.api_url}/api/data/"
-        # No client-side timeout: a slice can legitimately stream for a while.
         if to_file is not None:
-            with httpx.stream(
-                "POST", url, json=body, headers=self._headers(), timeout=None, follow_redirects=True
-            ) as resp:
-                resp.raise_for_status()
+            with self._http.stream("POST", url, json=body, timeout=STREAM_TIMEOUT) as resp:
+                self._raise_for_status(resp, stream=True)
                 with open(to_file, "wb") as fh:
                     for chunk in resp.iter_bytes():
                         fh.write(chunk)
             return to_file
-
-        resp = httpx.post(
-            url, json=body, headers=self._headers(), timeout=None, follow_redirects=True
-        )
-        resp.raise_for_status()
+        resp = self._http.post(url, json=body, timeout=STREAM_TIMEOUT)
+        self._raise_for_status(resp)
         return resp.content
 
     def submit_export(
@@ -245,20 +265,106 @@ class Client:
     ) -> ExportJob:
         """Submit a large, unbounded pull as a background job.
 
-        For pulls too big to stream inline, this runs server-side and returns an
-        :class:`ExportJob` you poll and then download. Wraps
-        ``POST /api/data/?async=true`` → ``202`` with a job id. **Requires an API
-        key** (jobs are owner-scoped), and ``format`` must be ``parquet`` or
-        ``csv``. For small or bounded pulls, use :meth:`get_data` instead.
+        Wraps ``POST /api/data/?async=true`` → ``202`` with a job id, returning an
+        :class:`ExportJob` to poll and download. ``format`` must be ``parquet`` or
+        ``csv``.
 
-        Example::
-
-            job = client.submit_export("WOD", ["temperature"], bbox=[-80, 20, -60, 45])
-            job.wait()
-            paths = job.download("wod_export/")   # one file per time shard
+        .. note::
+           The async job endpoints are authenticated by a **logged-in session**,
+           not an API key. Until the SDK supports session login (or the API
+           accepts API keys here), calling this with only an API key will raise
+           ``AquaviewAPIError`` (401). See the README for status.
         """
         if format not in ("parquet", "csv"):
             raise ValueError("async export supports only 'parquet' or 'csv'")
+        body = self._data_body(source, variables, bbox, datetime, depth, filters, None, format)
+        resp = self._http.post(f"{self.api_url}/api/data/", params={"async": "true"}, json=body)
+        self._raise_for_status(resp)
+        if resp.status_code != 202:
+            raise JobError(
+                "the server ran this query inline (it wasn't large enough for a background "
+                "job) — use get_data() for this pull instead"
+            )
+        return ExportJob(self, resp.json()["job_id"])
+
+    # ------------------------------------------------------------------ #
+    # Account usage / NL search (API key)
+    # ------------------------------------------------------------------ #
+
+    def get_usage(self) -> dict:
+        """Your account's usage, limits, and warnings. Requires an API key.
+        Wraps ``GET /api/account/usage``.
+        """
+        return self._get_json(f"{self.api_url}/api/account/usage")
+
+    def interpret(self, query: str) -> dict:
+        """Interpret a natural-language query into structured search filters you
+        can feed to :meth:`search`. Requires an API key. Wraps
+        ``POST /api/nl-search/interpret``.
+        """
+        return self._post_json(f"{self.api_url}/api/nl-search/interpret", {"query": query})
+
+    # ------------------------------------------------------------------ #
+    # Chat (SSE)
+    # ------------------------------------------------------------------ #
+
+    def chat_stream(self, message: str) -> Iterator[dict]:
+        """Ask the AQUAVIEW agent and yield each event as it streams.
+
+        Yields ``{"event": <name>, "data": <parsed>}`` dicts for the ``connected``
+        / ``progress`` / ``result`` / ``error`` events. Wraps the SSE endpoint
+        ``POST /api/agent/chat/stream``. Signed-in users, API keys, and (limited)
+        guests are all accepted.
+        """
+        url = f"{self.api_url}/api/agent/chat/stream"
+        with self._http.stream(
+            "POST", url, json={"message": message}, timeout=STREAM_TIMEOUT
+        ) as resp:
+            self._raise_for_status(resp, stream=True)
+            event: str | None = None
+            for line in resp.iter_lines():
+                if line.startswith("event:"):
+                    event = line[len("event:") :].strip()
+                elif line.startswith("data:"):
+                    raw = line[len("data:") :].strip()
+                    try:
+                        data: Any = json.loads(raw)
+                    except json.JSONDecodeError:
+                        data = raw
+                    yield {"event": event, "data": data}
+                    event = None
+
+    def chat(self, message: str) -> Any:
+        """Ask the AQUAVIEW agent and return the final answer (consumes the
+        stream for you). Raises :class:`AquaviewAPIError` if the agent emits an
+        ``error`` event. For live progress, use :meth:`chat_stream`.
+        """
+        result: Any = None
+        for evt in self.chat_stream(message):
+            if evt["event"] == "result":
+                result = evt["data"]
+            elif evt["event"] == "error":
+                data = evt["data"] if isinstance(evt["data"], dict) else {}
+                raise AquaviewAPIError(
+                    0, data.get("code"), data.get("message", "chat failed"), data
+                )
+        return result
+
+    # ------------------------------------------------------------------ #
+    # internals
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _data_body(
+        source: str,
+        variables: list[str],
+        bbox: list[float] | None,
+        datetime: str | None,
+        depth: list[float] | None,
+        filters: dict[str, Any] | None,
+        limit: int | None,
+        format: str,
+    ) -> dict[str, Any]:
         body: dict[str, Any] = {"source": source, "variables": list(variables), "format": format}
         if bbox is not None:
             body["bbox"] = list(bbox)
@@ -268,103 +374,47 @@ class Client:
             body["depth"] = list(depth)
         if filters is not None:
             body["filters"] = filters
+        if limit is not None:
+            body["limit"] = limit
+        return body
 
-        resp = httpx.post(
-            f"{self.api_url}/api/data/",
-            params={"async": "true"},
-            json=body,
-            headers=self._headers(),
-            timeout=self._timeout,
-            follow_redirects=True,
-        )
-        resp.raise_for_status()
-        if resp.status_code != 202:
-            raise JobError(
-                "the server ran this query inline (it wasn't large enough for a background "
-                "job) — use get_data() for this pull instead"
+    @staticmethod
+    def _raise_for_status(resp: httpx.Response, *, stream: bool = False) -> None:
+        if resp.status_code < 400:
+            return
+        if stream:
+            resp.read()  # a streamed error body isn't loaded until we ask
+        code: str | None = None
+        message = resp.text[:300]
+        payload: Any = None
+        try:
+            payload = resp.json()
+        except (json.JSONDecodeError, ValueError):
+            payload = None
+        if isinstance(payload, dict):
+            code = payload.get("error") or payload.get("code")
+            message = (
+                payload.get("message")
+                or payload.get("detail")
+                or payload.get("hint")
+                or code
+                or message
             )
-        return ExportJob(self, resp.json()["job_id"])
-
-    # ------------------------------------------------------------------ #
-    # Authenticated: account usage, API-key management
-    # ------------------------------------------------------------------ #
-
-    def get_usage(self) -> Any:
-        """Your account's usage, limits, and warnings. Requires an API key.
-        Wraps ``GET /api/account/usage``.
-        """
-        return self._get_json(f"{self.api_url}/api/account/usage")
-
-    def create_api_key(self, client_name: str, *, scope: dict | None = None) -> Any:
-        """Mint a new API key (returned once). Requires an API key with key-management
-        rights. Optional ``scope`` narrows the new key. Wraps ``POST /api/account/api-keys``.
-        """
-        body: dict[str, Any] = {"client_name": client_name}
-        if scope is not None:
-            body["scope"] = scope
-        return self._post_json(f"{self.api_url}/api/account/api-keys", body)
-
-    def delete_api_key(self, key_id: str) -> None:
-        """Revoke an API key. Wraps ``DELETE /api/account/api-keys/{key_id}``."""
-        resp = httpx.delete(
-            f"{self.api_url}/api/account/api-keys/{key_id}",
-            headers=self._headers(),
-            timeout=self._timeout,
-            follow_redirects=True,
-        )
-        resp.raise_for_status()
-
-    # ------------------------------------------------------------------ #
-    # Natural-language search + chat
-    # ------------------------------------------------------------------ #
-
-    def interpret(self, query: str) -> Any:
-        """Interpret a natural-language query into structured search filters you
-        can feed to :meth:`search`. Requires an API key. Wraps
-        ``POST /api/nl-search/interpret``.
-        """
-        return self._post_json(f"{self.api_url}/api/nl-search/interpret", {"query": query})
-
-    def chat(self, message: str) -> Any:
-        """Ask the AQUAVIEW agent a question and return its (non-streaming)
-        response. Wraps ``POST /api/agent/chat``.
-        """
-        return self._post_json(f"{self.api_url}/api/agent/chat", {"message": message})
-
-    # ------------------------------------------------------------------ #
-    # internals
-    # ------------------------------------------------------------------ #
-
-    def _headers(self) -> dict[str, str]:
-        if self.api_key:
-            return {"Authorization": f"Bearer {self.api_key}"}
-        return {}
+        raise AquaviewAPIError(resp.status_code, code, message, payload)
 
     def _get_json(self, url: str, params: dict | None = None) -> Any:
-        resp = httpx.get(
-            url,
-            params=params,
-            headers=self._headers(),
-            timeout=self._timeout,
-            follow_redirects=True,
-        )
-        resp.raise_for_status()
+        resp = self._http.get(url, params=params)
+        self._raise_for_status(resp)
         return resp.json()
 
     def _post_json(self, url: str, body: dict) -> Any:
-        resp = httpx.post(
-            url, json=body, headers=self._headers(), timeout=self._timeout, follow_redirects=True
-        )
-        resp.raise_for_status()
+        resp = self._http.post(url, json=body)
+        self._raise_for_status(resp)
         return resp.json()
 
     def __repr__(self) -> str:
         keyed = "keyed" if self.api_key else "anonymous"
         return f"Client(api_url={self.api_url!r}, {keyed})"
-
-
-class JobError(RuntimeError):
-    """An async export job failed, timed out, or has no result to download."""
 
 
 class ExportJob:
@@ -375,29 +425,32 @@ class ExportJob:
     :meth:`wait`, then :meth:`download` the parts into a directory.
     """
 
+    _TERMINAL_OK = "done"
+    _TERMINAL_BAD = ("failed", "expired")
+
     def __init__(self, client: Client, job_id: str) -> None:
         self._client = client
         self.job_id = job_id
 
     def status(self) -> dict:
-        """Current job status. Wraps ``GET /api/jobs/{job_id}`` (needs the API key)."""
+        """Current job status. Wraps ``GET /api/jobs/{job_id}``."""
         return self._client._get_json(f"{self._client.api_url}/api/jobs/{self.job_id}")
 
     def wait(self, *, poll_interval: float = 2.0, timeout: float = 900.0) -> ExportJob:
         """Poll until the job reaches a terminal state.
 
-        Returns ``self`` when the job is ``done``; raises :class:`JobError` if it
-        ``failed`` or ``timeout`` seconds elapse first.
+        Returns ``self`` when ``done``; raises :class:`JobError` if it ``failed``
+        / ``expired`` or ``timeout`` seconds elapse first.
         """
         deadline = time.monotonic() + timeout
         while True:
             status = self.status()
             state = status.get("status")
-            if state == "done":
+            if state == self._TERMINAL_OK:
                 return self
-            if state == "failed":
+            if state in self._TERMINAL_BAD:
                 raise JobError(
-                    f"export job {self.job_id} failed: {status.get('error') or 'unknown error'}"
+                    f"export job {self.job_id} {state}: {status.get('error') or 'no detail'}"
                 )
             if time.monotonic() > deadline:
                 raise JobError(f"export job {self.job_id} did not finish within {timeout:.0f}s")
@@ -408,7 +461,7 @@ class ExportJob:
         url = self.status().get("manifest_url")
         if not url:
             raise JobError(f"export job {self.job_id} has no result manifest yet")
-        resp = httpx.get(url, timeout=self._client._timeout, follow_redirects=True)
+        resp = httpx.get(url, timeout=DEFAULT_TIMEOUT, follow_redirects=True)
         resp.raise_for_status()
         return resp.json()
 
@@ -429,7 +482,7 @@ class ExportJob:
             if not part_url:
                 continue
             # Part URLs point at object storage, not our API — no auth header.
-            resp = httpx.get(part_url, timeout=None, follow_redirects=True)
+            resp = httpx.get(part_url, timeout=STREAM_TIMEOUT, follow_redirects=True)
             resp.raise_for_status()
             path = os.path.join(dest_dir, f"part-{part.get('idx', len(paths)):04d}.{fmt}")
             with open(path, "wb") as fh:

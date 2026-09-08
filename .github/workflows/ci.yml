@@ -46,7 +46,19 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install -e ".[dev]"
-      # NOTE: tests/ are live integration tests that hit the public AQUAVIEW
-      # catalog over the network. If catalog flakiness ever makes CI noisy,
-      # split these into a mocked unit suite + a scheduled integration run.
+      # Default run excludes `integration` (see pyproject addopts), so PR CI is
+      # fully mocked and deterministic — no network dependency.
       - run: pytest -q
+
+  integration:
+    name: Integration (live API, non-gating)
+    runs-on: ubuntu-latest
+    # Never blocks a merge — network/rate-limit flakiness shouldn't fail PRs.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e ".[dev]"
+      - run: pytest -q -m integration
