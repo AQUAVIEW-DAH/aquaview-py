@@ -4,6 +4,9 @@ on:
   pull_request:
   push:
     branches: [main]
+  schedule:
+    - cron: "0 6 * * *" # nightly live-API integration run
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -51,10 +54,11 @@ jobs:
       - run: pytest -q
 
   integration:
-    name: Integration (live API, non-gating)
+    name: Integration (live API)
+    # Live API is flaky/rate-limited, so keep it off PRs entirely: run nightly
+    # and on manual dispatch only.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    # Never blocks a merge — network/rate-limit flakiness shouldn't fail PRs.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

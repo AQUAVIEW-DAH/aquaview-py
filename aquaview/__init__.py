@@ -37,10 +37,11 @@ API_URL = "https://service.aquaview.org"
 #: Environment variable read for the API key when one isn't passed explicitly.
 API_KEY_ENV = "AQUAVIEW_API_KEY"
 
-#: Bounded connect/write/pool, but an unbounded read so a legitimately long
-#: slice or SSE stream isn't cut off. A dead connection still fails fast.
+#: All timeouts are finite so a stalled or half-open connection fails instead of
+#: hanging forever. ``read`` is httpx's *inactivity* timeout (reset on each chunk
+#: received), so a legitimately long download or SSE stream isn't cut off as long
+#: as bytes/keepalives keep arriving. Override per-client with ``Client(timeout=)``.
 DEFAULT_TIMEOUT = httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)
-STREAM_TIMEOUT = httpx.Timeout(connect=30.0, read=None, write=30.0, pool=30.0)
 
 
 __all__ = [
@@ -242,13 +243,13 @@ class Client:
         body = self._data_body(source, variables, bbox, datetime, depth, filters, limit, format)
         url = f"{self.api_url}/api/data/"
         if to_file is not None:
-            with self._http.stream("POST", url, json=body, timeout=STREAM_TIMEOUT) as resp:
+            with self._http.stream("POST", url, json=body) as resp:
                 self._raise_for_status(resp, stream=True)
                 with open(to_file, "wb") as fh:
                     for chunk in resp.iter_bytes():
                         fh.write(chunk)
             return to_file
-        resp = self._http.post(url, json=body, timeout=STREAM_TIMEOUT)
+        resp = self._http.post(url, json=body)
         self._raise_for_status(resp)
         return resp.content
 
@@ -312,9 +313,7 @@ class Client:
         guests are all accepted.
         """
         url = f"{self.api_url}/api/agent/chat/stream"
-        with self._http.stream(
-            "POST", url, json={"message": message}, timeout=STREAM_TIMEOUT
-        ) as resp:
+        with self._http.stream("POST", url, json={"message": message}) as resp:
             self._raise_for_status(resp, stream=True)
             event: str | None = None
             for line in resp.iter_lines():
@@ -453,9 +452,11 @@ class ExportJob:
                 raise JobError(
                     f"export job {self.job_id} {state}: {status.get('error') or 'no detail'}"
                 )
-            if time.monotonic() > deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 raise JobError(f"export job {self.job_id} did not finish within {timeout:.0f}s")
-            time.sleep(poll_interval)
+            # Never sleep past the deadline, even if poll_interval is larger.
+            time.sleep(min(poll_interval, remaining))
 
     def manifest(self) -> dict:
         """The result manifest (``{format, parts: [{url, ...}]}``). Call after the job is done."""
@@ -482,12 +483,16 @@ class ExportJob:
             part_url = part.get("url")
             if not part_url:
                 continue
-            # Part URLs point at object storage, not our API — no auth header.
-            resp = httpx.get(part_url, timeout=STREAM_TIMEOUT, follow_redirects=True)
-            resp.raise_for_status()
             path = os.path.join(dest_dir, f"part-{part.get('idx', len(paths)):04d}.{fmt}")
-            with open(path, "wb") as fh:
-                fh.write(resp.content)
+            # Part URLs point at object storage, not our API — no auth header.
+            # Stream to disk so a large shard never lands wholly in memory.
+            with httpx.stream(
+                "GET", part_url, timeout=DEFAULT_TIMEOUT, follow_redirects=True
+            ) as resp:
+                resp.raise_for_status()
+                with open(path, "wb") as fh:
+                    for chunk in resp.iter_bytes():
+                        fh.write(chunk)
             paths.append(path)
         return paths
 

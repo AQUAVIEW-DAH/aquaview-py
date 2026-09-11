@@ -34,6 +34,8 @@ aquaview = ["py.typed"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+# Example notebooks are teaching material — kept readable, not lint-formatted.
+extend-exclude = ["examples"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]

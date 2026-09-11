@@ -290,24 +290,44 @@ def test_export_job_download_parts(monkeypatch, tmp_path):
     def handler(req):  # status poll goes through the pooled client
         return httpx.Response(200, json={"status": "done", "manifest_url": "https://store/m.json"})
 
-    # manifest + part fetches hit object storage via module-level httpx.get (no auth)
+    # manifest fetch: module-level httpx.get (no auth)
     def fake_get(url, **kwargs):
-        request = httpx.Request("GET", url)
-        if url == "https://store/m.json":
-            return httpx.Response(
-                200,
-                request=request,
-                json={
-                    "format": "parquet",
-                    "parts": [
-                        {"idx": 0, "url": "https://store/part0"},
-                        {"idx": 1, "url": "https://store/part1"},
-                    ],
-                },
-            )
-        return httpx.Response(200, request=request, content=b"DATA:" + url.encode())
+        assert url == "https://store/m.json"
+        return httpx.Response(
+            200,
+            request=httpx.Request("GET", url),
+            json={
+                "format": "parquet",
+                "parts": [
+                    {"idx": 0, "url": "https://store/part0"},
+                    {"idx": 1, "url": "https://store/part1"},
+                ],
+            },
+        )
+
+    # part fetches: module-level httpx.stream, written to disk chunk by chunk
+    class FakeStream:
+        def __init__(self, url):
+            self.url = url
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def raise_for_status(self):
+            return None
+
+        def iter_bytes(self):
+            yield b"DATA:" + self.url.encode()
+
+    def fake_stream(method, url, **kwargs):
+        assert method == "GET"
+        return FakeStream(url)
 
     monkeypatch.setattr(aquaview.httpx, "get", fake_get)
+    monkeypatch.setattr(aquaview.httpx, "stream", fake_stream)
     monkeypatch.setattr(aquaview.time, "sleep", lambda _s: None)
     job = aquaview.ExportJob(client_with(handler, api_key="sk"), "job_9")
     paths = job.download(str(tmp_path))
