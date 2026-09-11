@@ -122,10 +122,13 @@ class Client:
         self.api_url = api_url.rstrip("/")
         self.api_key = api_key or os.environ.get(API_KEY_ENV)
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        # The configured timeout, also applied to object-store fetches (export
+        # manifest/parts) that bypass the pooled client to avoid sending the key.
+        self._timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
         # One pooled, keep-alive connection reused across every REST call.
         self._http = httpx.Client(
             headers=headers,
-            timeout=timeout if timeout is not None else DEFAULT_TIMEOUT,
+            timeout=self._timeout,
             follow_redirects=True,
         )
         self._stac_kwargs = stac_kwargs
@@ -402,8 +405,11 @@ class Client:
             )
         raise AquaviewAPIError(resp.status_code, code, message, payload)
 
-    def _get_json(self, url: str, params: dict | None = None) -> Any:
-        resp = self._http.get(url, params=params)
+    def _get_json(self, url: str, params: dict | None = None, timeout: Any = None) -> Any:
+        # timeout=None -> the pooled client's configured timeout; pass a value to
+        # bound a single request more tightly (e.g. a poll under a wait deadline).
+        kwargs = {} if timeout is None else {"timeout": timeout}
+        resp = self._http.get(url, params=params, **kwargs)
         self._raise_for_status(resp)
         return resp.json()
 
@@ -432,19 +438,28 @@ class ExportJob:
         self._client = client
         self.job_id = job_id
 
-    def status(self) -> dict:
-        """Current job status. Wraps ``GET /api/jobs/{job_id}``."""
-        return self._client._get_json(f"{self._client.api_url}/api/jobs/{self.job_id}")
+    def status(self, *, request_timeout: Any = None) -> dict:
+        """Current job status. Wraps ``GET /api/jobs/{job_id}``. ``request_timeout``
+        bounds this single HTTP request (used by :meth:`wait` to honor its deadline).
+        """
+        return self._client._get_json(
+            f"{self._client.api_url}/api/jobs/{self.job_id}", timeout=request_timeout
+        )
 
     def wait(self, *, poll_interval: float = 2.0, timeout: float = 900.0) -> ExportJob:
         """Poll until the job reaches a terminal state.
 
         Returns ``self`` when ``done``; raises :class:`JobError` if it ``failed``
-        / ``expired`` or ``timeout`` seconds elapse first.
+        / ``expired`` or ``timeout`` seconds elapse first. Each poll request is
+        itself bounded by the remaining time, so a stalled poll can't overrun the
+        deadline.
         """
         deadline = time.monotonic() + timeout
         while True:
-            status = self.status()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise JobError(f"export job {self.job_id} did not finish within {timeout:.0f}s")
+            status = self.status(request_timeout=httpx.Timeout(remaining))
             state = status.get("status")
             if state == self._TERMINAL_OK:
                 return self
@@ -463,7 +478,7 @@ class ExportJob:
         url = self.status().get("manifest_url")
         if not url:
             raise JobError(f"export job {self.job_id} has no result manifest yet")
-        resp = httpx.get(url, timeout=DEFAULT_TIMEOUT, follow_redirects=True)
+        resp = httpx.get(url, timeout=self._client._timeout, follow_redirects=True)
         resp.raise_for_status()
         return resp.json()
 
@@ -487,7 +502,7 @@ class ExportJob:
             # Part URLs point at object storage, not our API — no auth header.
             # Stream to disk so a large shard never lands wholly in memory.
             with httpx.stream(
-                "GET", part_url, timeout=DEFAULT_TIMEOUT, follow_redirects=True
+                "GET", part_url, timeout=self._client._timeout, follow_redirects=True
             ) as resp:
                 resp.raise_for_status()
                 with open(path, "wb") as fh:
