@@ -296,6 +296,63 @@ def test_export_job_wait_raises_on_expired(monkeypatch):
         aquaview.ExportJob(client_with(handler, api_key="sk"), "job_9").wait(poll_interval=0)
 
 
+def test_export_job_wait_backs_off_on_rate_limit(monkeypatch):
+    # A 429 while polling must not abort the wait — a long export can poll many
+    # times and trip the rate limiter well before the job itself finishes.
+    calls = {"n": 0}
+
+    def handler(req):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return httpx.Response(429, json={"error": "rate_exceeded"})
+        return httpx.Response(200, json={"status": "done"})
+
+    monkeypatch.setattr(aquaview.time, "sleep", lambda _s: None)
+    job = aquaview.ExportJob(client_with(handler, api_key="sk"), "job_9")
+    assert job.wait(poll_interval=0) is job
+    assert calls["n"] == 3  # two 429s were retried, third poll saw 'done'
+
+
+def test_export_job_wait_honors_retry_after(monkeypatch):
+    # First poll 429s with Retry-After: 7, second returns done. The header value
+    # is what gets slept, not the default poll interval.
+    seen = {"v": False}
+
+    def handler(req):
+        if not seen["v"]:
+            seen["v"] = True
+            return httpx.Response(
+                429, json={"error": "rate_exceeded"}, headers={"Retry-After": "7"}
+            )
+        return httpx.Response(200, json={"status": "done"})
+
+    slept: list[float] = []
+    monkeypatch.setattr(aquaview.time, "sleep", lambda s: slept.append(s))
+    job = aquaview.ExportJob(client_with(handler, api_key="sk"), "job_9")
+    job.wait(poll_interval=2)
+    assert slept == [7.0]
+
+
+def test_export_job_wait_reraises_non_transient_error(monkeypatch):
+    def handler(req):
+        return httpx.Response(404, json={"error": "not_found", "message": "no such job"})
+
+    monkeypatch.setattr(aquaview.time, "sleep", lambda _s: None)
+    with pytest.raises(aquaview.AquaviewAPIError) as exc:
+        aquaview.ExportJob(client_with(handler, api_key="sk"), "job_9").wait(poll_interval=0)
+    assert exc.value.status == 404
+
+
+def test_api_error_parses_retry_after_header():
+    def handler(req):
+        return httpx.Response(429, json={"error": "rate_exceeded"}, headers={"Retry-After": "12"})
+
+    with pytest.raises(aquaview.AquaviewAPIError) as exc:
+        client_with(handler, api_key="sk").get_usage()
+    assert exc.value.status == 429
+    assert exc.value.retry_after == 12.0
+
+
 def test_export_job_download_parts(monkeypatch, tmp_path):
     def handler(req):  # status poll goes through the pooled client
         return httpx.Response(200, json={"status": "done", "manifest_url": "https://store/m.json"})
