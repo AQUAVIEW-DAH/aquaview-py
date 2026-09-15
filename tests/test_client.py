@@ -165,6 +165,16 @@ def test_explicit_key_beats_env(monkeypatch):
     assert aquaview.Client(api_key="sk_explicit").api_key == "sk_explicit"
 
 
+def test_api_url_from_env(monkeypatch):
+    monkeypatch.setenv("AQUAVIEW_API_URL", "https://staging.example.org/")
+    assert aquaview.Client().api_url == "https://staging.example.org"
+
+
+def test_explicit_api_url_beats_env(monkeypatch):
+    monkeypatch.setenv("AQUAVIEW_API_URL", "https://staging.example.org")
+    assert aquaview.Client(api_url="https://x.example.org").api_url == "https://x.example.org"
+
+
 # --- nl search + chat (SSE) ---
 
 

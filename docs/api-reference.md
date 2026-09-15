@@ -38,7 +38,7 @@ the full data surface — plus release automation and typed errors.
 ```python
 import aquaview
 
-client = aquaview.Client()                 # anonymous — public data
+client = aquaview.Client()  # anonymous — public data
 client = aquaview.Client(api_key="sk_...")  # or set AQUAVIEW_API_KEY — gated data + account
 ```
 
@@ -126,9 +126,12 @@ Slice a source and return the raw bytes, or stream them to a file. Wraps
 
 ```python
 client.get_data(
-    "WOD", ["temperature", "salinity"],
-    bbox=[-71, 42, -70, 43], datetime="2020-01-01/2020-12-31",
-    format="csv", to_file="wod.csv",
+    "WOD",
+    ["temperature", "salinity"],
+    bbox=[-71, 42, -70, 43],
+    datetime="2020-01-01/2020-12-31",
+    format="csv",
+    to_file="wod.csv",
 )
 ```
 
@@ -144,7 +147,7 @@ Submit a large, unbounded pull as a **background job**. Wraps
 ```python
 job = client.submit_export("WOD", ["temperature"], bbox=[-80, 20, -60, 45])
 job.wait()
-paths = job.download("wod_export/")   # one file per time shard
+paths = job.download("wod_export/")  # one file per time shard
 ```
 
 #### `ExportJob`

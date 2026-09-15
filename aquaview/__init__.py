@@ -36,6 +36,8 @@ CATALOG_URL = "https://service.aquaview.org/stac"
 API_URL = "https://service.aquaview.org"
 #: Environment variable read for the API key when one isn't passed explicitly.
 API_KEY_ENV = "AQUAVIEW_API_KEY"
+#: Environment variable read for the API base URL when one isn't passed explicitly.
+API_URL_ENV = "AQUAVIEW_API_URL"
 
 #: All timeouts are finite so a stalled or half-open connection fails instead of
 #: hanging forever. ``read`` is httpx's *inactivity* timeout (reset on each chunk
@@ -112,14 +114,15 @@ class Client:
     def __init__(
         self,
         catalog_url: str = CATALOG_URL,
-        api_url: str = API_URL,
+        api_url: str | None = None,
         *,
         api_key: str | None = None,
         timeout: httpx.Timeout | float | None = None,
         **stac_kwargs: Any,
     ) -> None:
         self.catalog_url = catalog_url
-        self.api_url = api_url.rstrip("/")
+        # Explicit arg wins, then AQUAVIEW_API_URL, then the production default.
+        self.api_url = (api_url or os.environ.get(API_URL_ENV) or API_URL).rstrip("/")
         self.api_key = api_key or os.environ.get(API_KEY_ENV)
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         # The configured timeout, also applied to object-store fetches (export
