@@ -353,6 +353,39 @@ def test_api_error_parses_retry_after_header():
     assert exc.value.retry_after == 12.0
 
 
+def test_api_error_ignores_nonpositive_retry_after():
+    # A malformed non-positive Retry-After must be dropped, not fed to sleep()
+    # (a negative would raise ValueError; zero would busy-loop the poller).
+    for bad in ("-5", "0", "not-a-number"):
+
+        def handler(req, _bad=bad):
+            return httpx.Response(
+                429, json={"error": "rate_exceeded"}, headers={"Retry-After": _bad}
+            )
+
+        with pytest.raises(aquaview.AquaviewAPIError) as exc:
+            client_with(handler, api_key="sk").get_usage()
+        assert exc.value.retry_after is None
+
+
+def test_export_job_wait_survives_negative_retry_after(monkeypatch):
+    # A 429 with a bogus negative Retry-After must fall back to backoff and
+    # finish, not crash on time.sleep(-5).
+    calls = {"n": 0}
+
+    def handler(req):
+        calls["n"] += 1
+        if calls["n"] < 2:
+            return httpx.Response(
+                429, json={"error": "rate_exceeded"}, headers={"Retry-After": "-5"}
+            )
+        return httpx.Response(200, json={"status": "done"})
+
+    monkeypatch.setattr(aquaview.time, "sleep", lambda _s: None)
+    job = aquaview.ExportJob(client_with(handler, api_key="sk"), "job_9")
+    assert job.wait(poll_interval=1) is job
+
+
 def test_export_job_download_parts(monkeypatch, tmp_path):
     def handler(req):  # status poll goes through the pooled client
         return httpx.Response(200, json={"status": "done", "manifest_url": "https://store/m.json"})

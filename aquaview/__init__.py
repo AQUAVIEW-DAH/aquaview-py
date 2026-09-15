@@ -424,9 +424,13 @@ class Client:
         raw_retry = resp.headers.get("retry-after")
         if raw_retry is not None:
             try:
-                retry_after = float(raw_retry)
+                parsed = float(raw_retry)
             except ValueError:
-                retry_after = None
+                parsed = None
+            # Keep only a usable positive hint; a zero/negative/NaN value would
+            # busy-loop or crash a poll's sleep, so fall back to normal backoff.
+            if parsed is not None and parsed > 0:
+                retry_after = parsed
         raise AquaviewAPIError(resp.status_code, code, message, payload, retry_after=retry_after)
 
     def _get_json(self, url: str, params: dict | None = None, timeout: Any = None) -> Any:
@@ -502,8 +506,9 @@ class ExportJob:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise JobError(f"export job {self.job_id} did not finish within {timeout:.0f}s")
-            # Never sleep past the deadline, even if the backoff is larger.
-            time.sleep(min(seconds, remaining))
+            # Never sleep past the deadline, and never negative (a caller could
+            # pass a negative poll_interval) — time.sleep rejects a negative.
+            time.sleep(max(0.0, min(seconds, remaining)))
 
         while True:
             remaining = deadline - time.monotonic()
