@@ -494,10 +494,10 @@ class ExportJob:
 
         The gap between polls starts at ``poll_interval`` and grows geometrically
         up to ``max_interval``, so a long-running export makes tens of requests
-        rather than hundreds. A poll that hits a rate limit (429) or a transient
-        gateway error (502/503/504) is not fatal — it backs off (honoring a
-        ``Retry-After`` header when the server sends one) and retries within the
-        same deadline.
+        rather than hundreds. A poll that hits a rate limit (429), a transient
+        gateway error (502/503/504), or a connection blip (reset / DNS / read
+        timeout) is not fatal — it backs off (honoring a ``Retry-After`` header
+        when the server sends one) and retries within the same deadline.
         """
         deadline = time.monotonic() + timeout
         interval = poll_interval
@@ -522,6 +522,13 @@ class ExportJob:
                 # Transient: honor a server backoff hint if present, else the
                 # current interval. Don't advance past a terminal check.
                 _sleep_or_timeout(e.retry_after if e.retry_after is not None else interval)
+                interval = min(interval * self._BACKOFF_FACTOR, max_interval)
+                continue
+            except httpx.TransportError:
+                # A connection blip (reset/DNS/read timeout) during a long poll
+                # loop says nothing about the job — back off and retry rather
+                # than aborting the whole wait. Still bounded by the deadline.
+                _sleep_or_timeout(interval)
                 interval = min(interval * self._BACKOFF_FACTOR, max_interval)
                 continue
             state = status.get("status")

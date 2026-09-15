@@ -386,6 +386,39 @@ def test_export_job_wait_survives_negative_retry_after(monkeypatch):
     assert job.wait(poll_interval=1) is job
 
 
+def test_export_job_wait_retries_transport_error(monkeypatch):
+    # A connection blip mid-poll (reset / read timeout) must back off and retry,
+    # not abort the whole wait.
+    calls = {"n": 0}
+
+    def handler(req):
+        calls["n"] += 1
+        if calls["n"] < 2:
+            raise httpx.ReadTimeout("connection reset", request=req)
+        return httpx.Response(200, json={"status": "done"})
+
+    monkeypatch.setattr(aquaview.time, "sleep", lambda _s: None)
+    job = aquaview.ExportJob(client_with(handler, api_key="sk"), "job_9")
+    assert job.wait(poll_interval=0) is job
+    assert calls["n"] == 2
+
+
+def test_export_job_wait_clamps_negative_poll_interval(monkeypatch):
+    # A negative poll_interval must not reach time.sleep (it would ValueError);
+    # the clamp keeps the sleep at >= 0.
+    calls = {"n": 0}
+
+    def handler(req):
+        calls["n"] += 1
+        return httpx.Response(200, json={"status": "done" if calls["n"] >= 2 else "running"})
+
+    slept: list[float] = []
+    monkeypatch.setattr(aquaview.time, "sleep", lambda s: slept.append(s))
+    job = aquaview.ExportJob(client_with(handler, api_key="sk"), "job_9")
+    assert job.wait(poll_interval=-5) is job
+    assert all(s >= 0 for s in slept)
+
+
 def test_export_job_download_parts(monkeypatch, tmp_path):
     def handler(req):  # status poll goes through the pooled client
         return httpx.Response(200, json={"status": "done", "manifest_url": "https://store/m.json"})
