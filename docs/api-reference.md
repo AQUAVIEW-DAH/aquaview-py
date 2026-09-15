@@ -154,7 +154,7 @@ paths = job.download("wod_export/")  # one file per time shard
 | Method | Description |
 |---|---|
 | `status() -> dict` | Current job status (`GET /api/jobs/{id}`). |
-| `wait(*, poll_interval=2.0, timeout=900.0) -> ExportJob` | Poll until `done`; raises `JobError` on `failed` / `expired` / timeout. Each poll is bounded by the remaining deadline. |
+| `wait(*, poll_interval=2.0, timeout=900.0, max_interval=30.0) -> ExportJob` | Poll until `done`; raises `JobError` on `failed` / `expired` / timeout. The gap between polls grows geometrically from `poll_interval` to `max_interval`, so a long export makes tens of requests, not hundreds. A rate-limited (429), transient (502/503/504), or connection-error poll backs off (honoring `Retry-After`) and retries rather than aborting. Each poll is bounded by the remaining deadline. |
 | `manifest() -> dict` | The result manifest (`{format, parts: [{url, …}]}`). |
 | `download(dest_dir, *, wait=True) -> list[str]` | Stream each result part to `dest_dir`; returns the file paths. |
 

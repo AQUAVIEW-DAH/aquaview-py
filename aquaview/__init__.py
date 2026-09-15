@@ -67,11 +67,22 @@ class AquaviewAPIError(RuntimeError):
     and the raw ``payload`` for anything else (e.g. ``available_variables``).
     """
 
-    def __init__(self, status: int, code: str | None, message: str, payload: Any = None) -> None:
+    def __init__(
+        self,
+        status: int,
+        code: str | None,
+        message: str,
+        payload: Any = None,
+        *,
+        retry_after: float | None = None,
+    ) -> None:
         self.status = status
         self.code = code
         self.message = message
         self.payload = payload
+        # Seconds parsed from the ``Retry-After`` header on a 429/503, when
+        # present and numeric; lets a poll loop honor the server's backoff hint.
+        self.retry_after = retry_after
         super().__init__(f"[{status}{f' {code}' if code else ''}] {message}")
 
 
@@ -406,7 +417,21 @@ class Client:
                 or code
                 or message
             )
-        raise AquaviewAPIError(resp.status_code, code, message, payload)
+        # ``Retry-After`` is either a number of seconds or an HTTP date; keep only
+        # the numeric form (what rate limiters send), leaving the date form to the
+        # caller's own backoff.
+        retry_after: float | None = None
+        raw_retry = resp.headers.get("retry-after")
+        if raw_retry is not None:
+            try:
+                parsed = float(raw_retry)
+            except ValueError:
+                parsed = None
+            # Keep only a usable positive hint; a zero/negative/NaN value would
+            # busy-loop or crash a poll's sleep, so fall back to normal backoff.
+            if parsed is not None and parsed > 0:
+                retry_after = parsed
+        raise AquaviewAPIError(resp.status_code, code, message, payload, retry_after=retry_after)
 
     def _get_json(self, url: str, params: dict | None = None, timeout: Any = None) -> Any:
         # timeout=None -> the pooled client's configured timeout; pass a value to
@@ -436,6 +461,10 @@ class ExportJob:
 
     _TERMINAL_OK = "done"
     _TERMINAL_BAD = ("failed", "expired")
+    # A poll that hits a rate limit or a gateway blip says nothing about the job —
+    # back off and try again rather than aborting the wait.
+    _TRANSIENT_POLL_STATUSES = frozenset({429, 502, 503, 504})
+    _BACKOFF_FACTOR = 1.5
 
     def __init__(self, client: Client, job_id: str) -> None:
         self._client = client
@@ -449,20 +478,59 @@ class ExportJob:
             f"{self._client.api_url}/api/jobs/{self.job_id}", timeout=request_timeout
         )
 
-    def wait(self, *, poll_interval: float = 2.0, timeout: float = 900.0) -> ExportJob:
+    def wait(
+        self,
+        *,
+        poll_interval: float = 2.0,
+        timeout: float = 900.0,
+        max_interval: float = 30.0,
+    ) -> ExportJob:
         """Poll until the job reaches a terminal state.
 
         Returns ``self`` when ``done``; raises :class:`JobError` if it ``failed``
         / ``expired`` or ``timeout`` seconds elapse first. Each poll request is
         itself bounded by the remaining time, so a stalled poll can't overrun the
         deadline.
+
+        The gap between polls starts at ``poll_interval`` and grows geometrically
+        up to ``max_interval``, so a long-running export makes tens of requests
+        rather than hundreds. A poll that hits a rate limit (429), a transient
+        gateway error (502/503/504), or a connection blip (reset / DNS / read
+        timeout) is not fatal — it backs off (honoring a ``Retry-After`` header
+        when the server sends one) and retries within the same deadline.
         """
         deadline = time.monotonic() + timeout
+        interval = poll_interval
+
+        def _sleep_or_timeout(seconds: float) -> None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise JobError(f"export job {self.job_id} did not finish within {timeout:.0f}s")
+            # Never sleep past the deadline, and never negative (a caller could
+            # pass a negative poll_interval) — time.sleep rejects a negative.
+            time.sleep(max(0.0, min(seconds, remaining)))
+
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise JobError(f"export job {self.job_id} did not finish within {timeout:.0f}s")
-            status = self.status(request_timeout=httpx.Timeout(remaining))
+            try:
+                status = self.status(request_timeout=httpx.Timeout(remaining))
+            except AquaviewAPIError as e:
+                if e.status not in self._TRANSIENT_POLL_STATUSES:
+                    raise
+                # Transient: honor a server backoff hint if present, else the
+                # current interval. Don't advance past a terminal check.
+                _sleep_or_timeout(e.retry_after if e.retry_after is not None else interval)
+                interval = min(interval * self._BACKOFF_FACTOR, max_interval)
+                continue
+            except httpx.TransportError:
+                # A connection blip (reset/DNS/read timeout) during a long poll
+                # loop says nothing about the job — back off and retry rather
+                # than aborting the whole wait. Still bounded by the deadline.
+                _sleep_or_timeout(interval)
+                interval = min(interval * self._BACKOFF_FACTOR, max_interval)
+                continue
             state = status.get("status")
             if state == self._TERMINAL_OK:
                 return self
@@ -470,11 +538,8 @@ class ExportJob:
                 raise JobError(
                     f"export job {self.job_id} {state}: {status.get('error') or 'no detail'}"
                 )
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise JobError(f"export job {self.job_id} did not finish within {timeout:.0f}s")
-            # Never sleep past the deadline, even if poll_interval is larger.
-            time.sleep(min(poll_interval, remaining))
+            _sleep_or_timeout(interval)
+            interval = min(interval * self._BACKOFF_FACTOR, max_interval)
 
     def manifest(self) -> dict:
         """The result manifest (``{format, parts: [{url, ...}]}``). Call after the job is done."""
