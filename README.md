@@ -6,6 +6,8 @@
 
 Python SDK for the [AQUAVIEW](https://aquaview.org) oceanographic and environmental data catalog.
 
+📖 **Full API reference:** [docs/api-reference.md](docs/api-reference.md)
+
 ### Other ways to access AQUAVIEW
 
 **AI agents:** `https://mcp.aquaview.org/mcp` ([learn more](https://aquaview.org/mcp-overview))
