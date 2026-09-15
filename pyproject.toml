@@ -1,6 +1,6 @@
 [project]
 name = "aquaview"
-version = "0.4.1"
+version = "0.5.0"
 description = "Python SDK for the AQUAVIEW oceanographic and environmental data catalog"
 authors = [{ name = "AQUAVIEW Team", email = "contact@aquaview.org" }]
 readme = "README.md"
@@ -8,6 +8,7 @@ license = "MIT"
 requires-python = ">=3.10"
 dependencies = [
     "pystac-client>=0.8.0",
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
@@ -27,12 +28,21 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 packages = ["aquaview"]
 
+[tool.setuptools.package-data]
+aquaview = ["py.typed"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+# Example notebooks are teaching material — kept readable, not lint-formatted.
+extend-exclude = ["examples"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Live tests that hit the network are marked `integration` and excluded by
+# default so CI stays deterministic. Run them with `pytest -m integration`.
+addopts = "-m 'not integration'"
+markers = ["integration: exercises the live AQUAVIEW API over the network"]
